@@ -344,6 +344,7 @@ proc storeBlock(
   debug "Block received",
     signedBlock = shortLog(signedBlock.message),
     blockRoot = shortLog(signedBlock.root),
+    graffiti = $signedBlock.message.body.graffiti,
     pcs = "receive_block"
 
   beacon_blocks_received.inc()

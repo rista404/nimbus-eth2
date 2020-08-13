@@ -220,7 +220,7 @@ medalla-dev: | beacon_node
 
 	build/beacon_node \
 		--network=medalla \
-		--log-level="DEBUG; TRACE:discv5,networking; REQUIRED:none; DISABLED:none" \
+		--log-level="DEBUG;TRACE:;REQUIRED:none;DISABLED:none" \
 		--data-dir=build/data/shared_medalla_$(NODE_ID) \
 		$(GOERLI_TESTNETS_PARAMS) --dump $(NODE_PARAMS)
 
