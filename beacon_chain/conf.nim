@@ -92,9 +92,15 @@ type
 
     netKeyInsecurePassword* {.
       defaultValue: false,
-      desc: "Use pre-generated INSECURE password for network private key " &
-            "file (default: false)"
-      name: "insecure-netkey-password" }: bool
+      desc: "Use pre-generated INSECURE password for network keystores " &
+            "(default: false)"
+      name: "netkey-insecure-password" }: bool
+
+    keyInsecurePassword* {.
+      defaultValue: false,
+      desc: "Use pre-generated INSECURE password for validator keystores " &
+            "(default: false)"
+      name: "key-insecure-password" }: bool
 
     case cmd* {.
       command
@@ -327,11 +333,6 @@ type
           desc: "Output folder for validator keystores"
           name: "out-validators-dir" }: string
 
-        outSecretsDir* {.
-          defaultValue: "secrets"
-          desc: "Output folder for randomly generated keystore passphrases"
-          name: "out-secrets-dir" }: string
-
         outDepositsFile* {.
           desc: "The name of generated deposits file"
           name: "out-deposits-file" }: Option[OutFile]
@@ -375,10 +376,6 @@ type
     validatorsDirFlag* {.
       desc: "A directory containing validator keystores"
       name: "validators-dir" }: Option[InputDir]
-
-    secretsDirFlag* {.
-      desc: "A directory containing validator keystore passwords"
-      name: "secrets-dir" }: Option[InputDir]
 
     case cmd* {.
       command
