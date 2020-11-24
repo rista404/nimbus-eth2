@@ -31,10 +31,7 @@ type
     # so we **must** use "root" as a field name
     root: string
     # Some have a signing_root field
-    signing_root: string
-
-# Make signing root optional
-setDefaultValue(SSZHashTreeRoot, signing_root, "")
+    signing_root {.defaultVal: "".}: string
 
 # Note this only tracks HashTreeRoot
 # Checking the values against the yaml file is TODO (require more flexible Yaml parser)
