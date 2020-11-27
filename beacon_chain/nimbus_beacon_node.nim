@@ -35,6 +35,11 @@ import
   sync_manager, validator_duties, filepath,
   validator_slashing_protection, ./eth2_processor
 
+from 
+  libp2p/protocols/pubsub/gossipsub 
+import 
+  TopicParams, validateParameters, init
+
 const
   hasPrompt = not defined(withoutPrompt)
 
@@ -365,10 +370,34 @@ func verifyFinalization(node: BeaconNode, slot: Slot) =
 proc installAttestationSubnetHandlers(node: BeaconNode, subnets: set[uint8]) =
   var attestationSubscriptions: seq[Future[void]] = @[]
 
+  const topicParams = TopicParams(
+    topicWeight: 0.015625,
+    timeInMeshWeight: 0.03333333333333333,
+    timeInMeshQuantum: chronos.seconds(12),
+    timeInMeshCap: 300,
+    firstMessageDeliveriesWeight: 0.8611923631641919,
+    firstMessageDeliveriesDecay: 0.8659643233600653,
+    firstMessageDeliveriesCap: 46.44723027156447,
+    meshMessageDeliveriesWeight: -37.221277470375405,
+    meshMessageDeliveriesDecay: 0.9646616199111993,
+    meshMessageDeliveriesThreshold: 13.595606364013024,
+    meshMessageDeliveriesCap: 217.5297018242084,
+    meshMessageDeliveriesActivation: chronos.seconds(204),
+    meshMessageDeliveriesWindow: chronos.seconds(2),
+    meshFailurePenaltyWeight: -37.221277470375405 ,
+    meshFailurePenaltyDecay: 0.9646616199111993,
+    invalidMessageDeliveriesWeight: -6879.999999999998,
+    invalidMessageDeliveriesDecay: 0.9971259067705325
+  )
+
+  static:
+    # compile time validation
+    topicParams.validateParameters().tryGet()
+
   # https://github.com/ethereum/eth2.0-specs/blob/v1.0.0/specs/phase0/p2p-interface.md#attestations-and-aggregation
   for subnet in subnets:
     attestationSubscriptions.add(node.network.subscribe(
-      getAttestationTopic(node.forkDigest, subnet)))
+      getAttestationTopic(node.forkDigest, subnet), topicParams))
 
   waitFor allFutures(attestationSubscriptions)
 
@@ -449,15 +478,66 @@ proc getAttestationHandlers(node: BeaconNode): Future[void] =
   node.attestationSubnets.subscribedSubnets[0] = initialSubnets
   node.attestationSubnets.subscribedSubnets[1] = initialSubnets
 
-  node.network.subscribe(getAggregateAndProofsTopic(node.forkDigest))
+  const topicParams = TopicParams(
+    topicWeight: 0.5,
+    timeInMeshWeight: 0.03333333333333333,
+    timeInMeshQuantum: chronos.seconds(12),
+    timeInMeshCap: 300,
+    firstMessageDeliveriesWeight: 0.10764904539552399,
+    firstMessageDeliveriesDecay: 0.8659643233600653,
+    firstMessageDeliveriesCap: 371.5778421725158,
+    meshMessageDeliveriesWeight: -0.07538533073670682,
+    meshMessageDeliveriesDecay: 0.930572040929699,
+    meshMessageDeliveriesThreshold: 53.404248450179836,
+    meshMessageDeliveriesCap: 213.61699380071934,
+    meshMessageDeliveriesActivation: chronos.seconds(384),
+    meshMessageDeliveriesWindow: chronos.seconds(2),
+    meshFailurePenaltyWeight: -0.07538533073670682 ,
+    meshFailurePenaltyDecay: 0.930572040929699,
+    invalidMessageDeliveriesWeight: -214.99999999999994,
+    invalidMessageDeliveriesDecay: 0.9971259067705325
+  )
+
+  static:
+    # compile time validation
+    topicParams.validateParameters().tryGet()
+
+  node.network.subscribe(getAggregateAndProofsTopic(node.forkDigest), topicParams)
 
 proc addMessageHandlers(node: BeaconNode): Future[void] =
+  const blocksTopicParams = TopicParams(
+    topicWeight: 0.5,
+    timeInMeshWeight: 0.03333333333333333,
+    timeInMeshQuantum: chronos.seconds(12),
+    timeInMeshCap: 300,
+    firstMessageDeliveriesWeight: 1.1471603557060206,
+    firstMessageDeliveriesDecay: 0.9928302477768374,
+    firstMessageDeliveriesCap: 34.86870846001471,
+    meshMessageDeliveriesWeight: -458.31054878249114,
+    meshMessageDeliveriesDecay: 0.9716279515771061,
+    meshMessageDeliveriesThreshold: 0.6849191409056553,
+    meshMessageDeliveriesCap: 2.054757422716966,
+    meshMessageDeliveriesActivation: chronos.seconds(384),
+    meshMessageDeliveriesWindow: chronos.seconds(2),
+    meshFailurePenaltyWeight: -458.31054878249114 ,
+    meshFailurePenaltyDecay: 0.9716279515771061,
+    invalidMessageDeliveriesWeight: -214.99999999999994,
+    invalidMessageDeliveriesDecay: 0.9971259067705325
+  )
+
+  const basicParams = TopicParams.init()
+
+  static:
+    # compile time validation
+    blocksTopicParams.validateParameters().tryGet()
+    basicParams.validateParameters.tryGet()
+
   allFutures(
     # As a side-effect, this gets the attestation subnets too.
-    node.network.subscribe(node.topicBeaconBlocks),
-    node.network.subscribe(getAttesterSlashingsTopic(node.forkDigest)),
-    node.network.subscribe(getProposerSlashingsTopic(node.forkDigest)),
-    node.network.subscribe(getVoluntaryExitsTopic(node.forkDigest)),
+    node.network.subscribe(node.topicBeaconBlocks, blocksTopicParams),
+    node.network.subscribe(getAttesterSlashingsTopic(node.forkDigest), basicParams),
+    node.network.subscribe(getProposerSlashingsTopic(node.forkDigest), basicParams),
+    node.network.subscribe(getVoluntaryExitsTopic(node.forkDigest), basicParams),
 
     node.getAttestationHandlers()
   )

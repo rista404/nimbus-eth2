@@ -56,7 +56,7 @@ type
 
   Eth2Node* = ref object of RootObj
     switch*: Switch
-    pubsub*: PubSub
+    pubsub*: GossipSub
     discovery*: Eth2DiscoveryProtocol
     discoveryEnabled*: bool
     wantedPeers*: int
@@ -1060,7 +1060,7 @@ proc onConnEvent(node: Eth2Node, peerId: PeerID, event: ConnEvent) {.async.} =
       peer.connectionState = Disconnected
 
 proc init*(T: type Eth2Node, conf: BeaconNodeConf, enrForkId: ENRForkID,
-           switch: Switch, pubsub: PubSub, ip: Option[ValidIpAddress],
+           switch: Switch, pubsub: GossipSub, ip: Option[ValidIpAddress],
            tcpPort, udpPort: Port, privKey: keys.PrivateKey, discovery: bool,
            rng: ref BrHmacDrbgContext): T =
   new result
@@ -1537,6 +1537,16 @@ proc createEth2Node*(rng: ref BrHmacDrbgContext,
         p.historyLength = 6
         p.historyGossip = 3
         p.seenTTL = 385.seconds
+        p.gossipThreshold = -4000
+        p.publishThreshold = -8000
+        p.graylistThreshold = -16000
+        p.decayInterval = 12.seconds
+        p.decayToZero = 0.01
+        p.retainScore = 385.seconds
+        p.ipColocationFactorWeight = -53.75
+        p.ipColocationFactorThreshold = 3
+        p.behaviourPenaltyWeight = -15.9
+        p.behaviourPenaltyDecay = 0.986
         p.validateParameters().tryGet()
         p
     pubsub = GossipSub.init(
@@ -1546,7 +1556,7 @@ proc createEth2Node*(rng: ref BrHmacDrbgContext,
       sign = false,
       verifySignature = false,
       anonymize = true,
-      parameters = params).PubSub
+      parameters = params)
 
   switch.mount(pubsub)
 
@@ -1563,10 +1573,11 @@ proc announcedENR*(node: Eth2Node): enr.Record =
 proc shortForm*(id: KeyPair): string =
   $PeerID.init(id.pubkey)
 
-proc subscribe*(node: Eth2Node, topic: string) {.async.} =
+proc subscribe*(node: Eth2Node, topic: string, topicParams: TopicParams) {.async.} =
   proc dummyMsgHandler(topic: string, data: seq[byte]) {.async.} =
     discard
 
+  node.pubsub.topicParams[topic] = topicParams
   await node.pubsub.subscribe(topic & "_snappy", dummyMsgHandler)
 
 proc addValidator*[MsgType](node: Eth2Node,
