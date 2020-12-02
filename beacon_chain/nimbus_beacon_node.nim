@@ -894,7 +894,7 @@ proc run*(node: BeaconNode) =
     node.requestManager.start()
     node.startSyncManager()
 
-    node.setupSelfSlashingProtection(slot)
+    node.setupSelfSlashingProtection(curSlot)
     waitFor node.addMessageHandlers()
     doAssert node.getTopicSubscriptionEnabled()
 
