@@ -1547,6 +1547,7 @@ proc createEth2Node*(rng: ref BrHmacDrbgContext,
         p.ipColocationFactorThreshold = 3
         p.behaviourPenaltyWeight = -15.9
         p.behaviourPenaltyDecay = 0.986
+        p.floodPublish = true
         p.validateParameters().tryGet()
         p
     pubsub = GossipSub.init(
