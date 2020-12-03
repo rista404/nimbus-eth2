@@ -146,8 +146,8 @@ proc init*(T: type BeaconNode,
         # TODO Could move this to a separate "GenesisMonitor" process or task
         #      that would do only this - see Paul's proposal for this.
         let eth1MonitorRes = await Eth1Monitor.init(
-          db,
           conf.runtimePreset,
+          db,
           conf.web3Url,
           conf.depositContractAddress.get,
           conf.depositContractDeployedAt.get,
@@ -263,8 +263,8 @@ proc init*(T: type BeaconNode,
     # TODO(zah) if we don't have any validators attached,
     #           we don't need a mainchain monitor
     let eth1MonitorRes = await Eth1Monitor.init(
-      db,
       conf.runtimePreset,
+      db,
       conf.web3Url,
       conf.depositContractAddress.get,
       genesisDepositsSnapshot,
