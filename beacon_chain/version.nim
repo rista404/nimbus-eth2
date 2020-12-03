@@ -9,13 +9,13 @@ when not defined(nimscript):
 const
   versionMajor* = 1
   versionMinor* = 0
-  versionBuild* = 0
+  versionBuild* = 1
 
-  versionBlob* = "rc1" # Single word - ends up in the default graffitti
+  versionBlob* = "stateofus" # Single word - ends up in the default graffitti
 
   useInsecureFeatures* = defined(insecure)
 
-  gitRevision* = staticExec("git rev-parse --short HEAD")
+  gitRevision* = strip(staticExec("git rev-parse --short HEAD"))
 
   nimBanner* = staticExec("nim --version | grep -v Compiled")
 

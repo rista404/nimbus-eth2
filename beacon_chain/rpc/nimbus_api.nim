@@ -5,7 +5,7 @@
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
 import
-  std/[deques, sequtils, strutils],
+  std/[deques, sequtils],
   chronos,
   stew/shims/macros,
   stew/byteutils,
@@ -14,7 +14,10 @@ import
   rpc_utils,
   ../beacon_node_common, ../nimbus_binary_common, ../eth2_network,
   ../eth1_monitor, ../validator_duties,
-  ../spec/[digest, datatypes, presets]
+  ../spec/[digest, datatypes, presets],
+
+  libp2p/protocols/pubsub/[gossipsub, pubsubpeer]
+
 
 logScope: topics = "nimbusapi"
 
@@ -22,14 +25,12 @@ type
   RpcServer = RpcHttpServer
   Eth1Block = eth1_monitor.Eth1Block
 
-when defined(chronosFutureTracking):
-  type
-    FutureInfo* = object
-      id*: int
-      procname*: string
-      filename*: string
-      line*: int
-      state: string
+  FutureInfo* = object
+    id*: int
+    procname*: string
+    filename*: string
+    line*: int
+    state*: string
 
 proc installNimbusApiHandlers*(rpcServer: RpcServer, node: BeaconNode) =
   ## Install non-standard api handlers - some of these are used by 3rd-parties
@@ -63,24 +64,6 @@ proc installNimbusApiHandlers*(rpcServer: RpcServer, node: BeaconNode) =
 
   rpcServer.rpc("getNodeVersion") do () -> string:
     return "Nimbus/" & fullVersionStr
-
-  rpcServer.rpc("getSpecPreset") do () -> JsonNode:
-    var res = newJObject()
-    genStmtList:
-      for presetValue in PresetValue:
-        if presetValue notin ignoredValues + runtimeValues:
-          let
-            settingSym = ident($presetValue)
-            settingKey = newLit(toLowerAscii($presetValue))
-          let f = quote do:
-            res[`settingKey`] = %(presets.`settingSym`)
-          yield f
-
-    for field, value in fieldPairs(node.config.runtimePreset):
-      res[field] = when value isnot Version: %value
-                   else: %value.toUInt64
-
-    return res
 
   rpcServer.rpc("peers") do () -> JsonNode:
     var res = newJObject()
@@ -116,8 +99,8 @@ proc installNimbusApiHandlers*(rpcServer: RpcServer, node: BeaconNode) =
     node.chainDag.withState(node.chainDag.tmpState, head.atSlot(wallSlot)):
       return node.getBlockProposalEth1Data(state)
 
-  when defined(chronosFutureTracking):
-    rpcServer.rpc("getChronosFutures") do () -> seq[FutureInfo]:
+  rpcServer.rpc("getChronosFutures") do () -> seq[FutureInfo]:
+    when defined(chronosFutureTracking):
       var res: seq[FutureInfo]
 
       for item in pendingFutures():
@@ -131,3 +114,42 @@ proc installNimbusApiHandlers*(rpcServer: RpcServer, node: BeaconNode) =
         )
 
       return res
+    else:
+      raise (ref CatchableError)(
+        msg: "Compile with '-d:chronosFutureTracking' to enable this request")
+
+  rpcServer.rpc("getGossipSubPeers") do () -> JsonNode:
+    var res = newJObject()
+    var gossipsub = newJObject()
+
+    proc toNode(v: PubSubPeer): JsonNode =
+      %(
+        peerId: $v.peerId,
+        score: v.score,
+        iWantBudget: v.iWantBudget,
+        iHaveBudget: v.iHaveBudget,
+        outbound: v.outbound,
+        appScore: v.appScore,
+        behaviourPenalty: v.behaviourPenalty
+      )
+
+    for topic, v in node.network.pubsub.gossipsub:
+      var peers = newJArray()
+      for peer in v:
+        peers.add(peer.toNode())
+
+      gossipsub.add(topic, peers)
+
+    res.add("gossipsub", gossipsub)
+
+    var mesh = newJObject()
+    for topic, v in node.network.pubsub.mesh:
+      var peers = newJArray()
+      for peer in v:
+        peers.add(peer.toNode())
+
+      mesh.add(topic, peers)
+
+    res.add("mesh", mesh)
+
+    return res

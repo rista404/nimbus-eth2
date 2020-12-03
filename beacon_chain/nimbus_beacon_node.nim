@@ -7,12 +7,12 @@
 
 import
   # Standard library
-  std/[os, tables, strutils, strformat, sequtils, times, math, terminal, osproc,
-    random],
+  std/[os, tables, strutils, strformat, sequtils, times, math,
+       terminal, osproc, random],
 
   # Nimble packages
   stew/[objects, byteutils, endians2, io2], stew/shims/macros,
-  chronos, confutils, metrics, json_rpc/[rpcserver, jsonmarshal],
+  chronos, confutils, metrics, json_rpc/[rpcclient, rpcserver, jsonmarshal],
   chronicles, bearssl, blscurve,
   json_serialization/std/[options, sets, net], serialization/errors,
 
@@ -24,13 +24,14 @@ import
   ./rpc/[beacon_api, config_api, debug_api, event_api, nimbus_api, node_api,
     validator_api],
   spec/[datatypes, digest, crypto, beaconstate, helpers, network, presets],
-  spec/[weak_subjectivity],
+  spec/[weak_subjectivity, signatures],
+  spec/eth2_apis/beacon_rpc_client,
   conf, time, beacon_chain_db, validator_pool, extras,
   attestation_pool, exit_pool, eth2_network, eth2_discovery,
   beacon_node_common, beacon_node_types, beacon_node_status,
   block_pools/[chain_dag, quarantine, clearance, block_pools_types],
   nimbus_binary_common, network_metadata,
-  eth1_monitor, version, ssz/[navigator, merkleization],
+  eth1_monitor, version, ssz/merkleization,
   sync_protocol, request_manager, keystore_management, interop, statusbar,
   sync_manager, validator_duties, filepath,
   validator_slashing_protection, ./eth2_processor
@@ -50,8 +51,8 @@ template init(T: type RpcHttpServer, ip: ValidIpAddress, port: Port): T =
   newRpcHttpServer([initTAddress(ip, port)])
 
 # https://github.com/ethereum/eth2.0-metrics/blob/master/metrics.md#interop-metrics
-declareGauge beacon_slot,
-  "Latest slot of the beacon chain state"
+declareGauge beacon_slot, "Latest slot of the beacon chain state"
+declareGauge beacon_current_epoch, "Current epoch"
 
 # Finalization tracking
 declareGauge finalization_delay,
@@ -225,7 +226,7 @@ proc init*(T: type BeaconNode,
   if genesisStateContents != nil:
     let
       networkGenesisValidatorsRoot =
-        sszMount(genesisStateContents[], BeaconState).genesis_validators_root[]
+        extractGenesisValidatorRootFromSnapshop(genesisStateContents[])
 
     if networkGenesisValidatorsRoot != databaseGenesisValidatorsRoot:
       fatal "The specified --data-dir contains data for a different network",
@@ -458,8 +459,7 @@ proc cycleAttestationSubnets(node: BeaconNode, slot: Slot) =
       node.attestationSubnets.subscribedSubnets[1] +
       {node.attestationSubnets.stabilitySubnet.uint8}
     for subnet in 0'u8 ..< ATTESTATION_SUBNET_COUNT:
-      doAssert node.network.metadata.attnets[subnet] ==
-        (subnet in subscribed_subnets)
+      node.network.metadata.attnets[subnet] = subnet in subscribed_subnets
 
 proc getAttestationHandlers(node: BeaconNode): Future[void] =
   var initialSubnets: set[uint8]
@@ -565,6 +565,57 @@ proc removeMessageHandlers(node: BeaconNode): Future[void] =
 
   allFutures(unsubscriptions)
 
+proc updateGossipStatus(node: BeaconNode, slot: Slot) {.async.} =
+  # Syncing tends to be ~1 block/s, and allow for an epoch of time for libp2p
+  # subscribing to spin up. The faster the sync, the more wallSlot - headSlot
+  # lead time is required
+  const
+    TOPIC_SUBSCRIBE_THRESHOLD_SLOTS = 64
+    HYSTERESIS_BUFFER = 16
+
+  let
+    syncQueueLen = node.syncManager.syncQueueLen
+    topicSubscriptionEnabled = node.getTopicSubscriptionEnabled()
+  if
+      # Don't enable if already enabled; to avoid race conditions requires care,
+      # but isn't crucial, as this condition spuriously fail, but the next time,
+      # should properly succeed.
+      not topicSubscriptionEnabled and
+      # SyncManager forward sync by default runs until maxHeadAge slots, or one
+      # epoch range is achieved. This particular condition has a couple caveats
+      # including that under certain conditions, debtsCount appears to push len
+      # (here, syncQueueLen) to underflow-like values; and even when exactly at
+      # the expected walltime slot the queue isn't necessarily empty. Therefore
+      # TOPIC_SUBSCRIBE_THRESHOLD_SLOTS is not exactly the number of slots that
+      # are left. Furthermore, even when 0 peers are being used, this won't get
+      # to 0 slots in syncQueueLen, but that's a vacuous condition given that a
+      # networking interaction cannot happen under such circumstances.
+      syncQueueLen < TOPIC_SUBSCRIBE_THRESHOLD_SLOTS:
+    # When node.cycleAttestationSubnets() is enabled more properly, integrate
+    # this into the node.cycleAttestationSubnets() call.
+    debug "Enabling topic subscriptions",
+      wallSlot = slot,
+      headSlot = node.chainDag.head.slot,
+      syncQueueLen
+
+    await node.addMessageHandlers()
+    doAssert node.getTopicSubscriptionEnabled()
+  elif
+      topicSubscriptionEnabled and
+      syncQueueLen > TOPIC_SUBSCRIBE_THRESHOLD_SLOTS + HYSTERESIS_BUFFER and
+      # Filter out underflow from debtsCount; plausible queue lengths can't
+      # exceed wallslot, with safety margin.
+      syncQueueLen < 2 * slot.uint64:
+    debug "Disabling topic subscriptions",
+      wallSlot = slot,
+      headSlot = node.chainDag.head.slot,
+      syncQueueLen
+    await node.removeMessageHandlers()
+
+  # Subscription or unsubscription might have occurred; recheck
+  if slot.isEpoch and node.getTopicSubscriptionEnabled:
+    node.cycleAttestationSubnets(slot)
+
 proc onSlotStart(node: BeaconNode, lastSlot, scheduledSlot: Slot) {.async.} =
   ## Called at the beginning of a slot - usually every slot, but sometimes might
   ## skip a few in case we're running late.
@@ -621,6 +672,8 @@ proc onSlotStart(node: BeaconNode, lastSlot, scheduledSlot: Slot) {.async.} =
     nextSlot = slot + 1
 
   beacon_slot.set slot.int64
+  beacon_current_epoch.set slot.epoch.int64
+
   finalization_delay.set scheduledSlot.epoch.int64 - finalizedEpoch.int64
 
   if node.config.verifyFinalization:
@@ -676,55 +729,7 @@ proc onSlotStart(node: BeaconNode, lastSlot, scheduledSlot: Slot) {.async.} =
     finalizedHead = shortLog(node.chainDag.finalizedHead.blck),
     finalizedEpoch = shortLog(node.chainDag.finalizedHead.blck.slot.compute_epoch_at_slot())
 
-  # Syncing tends to be ~1 block/s, and allow for an epoch of time for libp2p
-  # subscribing to spin up. The faster the sync, the more wallSlot - headSlot
-  # lead time is required
-  const
-    TOPIC_SUBSCRIBE_THRESHOLD_SLOTS = 64
-    HYSTERESIS_BUFFER = 16
-
-  let
-    syncQueueLen = node.syncManager.syncQueueLen
-    topicSubscriptionEnabled = node.getTopicSubscriptionEnabled()
-  if
-      # Don't enable if already enabled; to avoid race conditions requires care,
-      # but isn't crucial, as this condition spuriously fail, but the next time,
-      # should properly succeed.
-      not topicSubscriptionEnabled and
-      # SyncManager forward sync by default runs until maxHeadAge slots, or one
-      # epoch range is achieved. This particular condition has a couple caveats
-      # including that under certain conditions, debtsCount appears to push len
-      # (here, syncQueueLen) to underflow-like values; and even when exactly at
-      # the expected walltime slot the queue isn't necessarily empty. Therefore
-      # TOPIC_SUBSCRIBE_THRESHOLD_SLOTS is not exactly the number of slots that
-      # are left. Furthermore, even when 0 peers are being used, this won't get
-      # to 0 slots in syncQueueLen, but that's a vacuous condition given that a
-      # networking interaction cannot happen under such circumstances.
-      syncQueueLen < TOPIC_SUBSCRIBE_THRESHOLD_SLOTS:
-    # When node.cycleAttestationSubnets() is enabled more properly, integrate
-    # this into the node.cycleAttestationSubnets() call.
-    debug "Enabling topic subscriptions",
-      wallSlot = slot,
-      headSlot = node.chainDag.head.slot,
-      syncQueueLen
-
-    await node.addMessageHandlers()
-    doAssert node.getTopicSubscriptionEnabled()
-  elif
-      topicSubscriptionEnabled and
-      syncQueueLen > TOPIC_SUBSCRIBE_THRESHOLD_SLOTS + HYSTERESIS_BUFFER and
-      # Filter out underflow from debtsCount; plausible queue lengths can't
-      # exceed wallslot, with safety margin.
-      syncQueueLen < 2 * slot.uint64:
-    debug "Disabling topic subscriptions",
-      wallSlot = slot,
-      headSlot = node.chainDag.head.slot,
-      syncQueueLen
-    await node.removeMessageHandlers()
-
-  # Subscription or unsubscription might have occurred; recheck
-  if slot.isEpoch and node.getTopicSubscriptionEnabled:
-    node.cycleAttestationSubnets(slot)
+  await node.updateGossipStatus(slot)
 
   when declared(GC_fullCollect):
     # The slots in the beacon node work as frames in a game: we want to make
@@ -892,6 +897,9 @@ proc run*(node: BeaconNode) =
     node.requestManager.start()
     node.startSyncManager()
 
+    waitFor node.addMessageHandlers()
+    doAssert node.getTopicSubscriptionEnabled()
+
   ## Ctrl+C handling
   proc controlCHandler() {.noconv.} =
     when defined(windows):
@@ -967,7 +975,10 @@ func formatGwei(amount: uint64): string =
   result = $eth
   if remainder != 0:
     result.add '.'
-    result.add $remainder
+    let remainderStr = $remainder
+    for i in remainderStr.len ..< 9:
+      result.add '0'
+    result.add remainderStr
     while result[^1] == '0':
       result.setLen(result.len - 1)
 
@@ -1061,13 +1072,7 @@ when hasPrompt:
           slotStr
 
         of "attached_validators_balance":
-          var balance = uint64(0)
-          # TODO slow linear scan!
-          for idx, b in node.chainDag.headState.data.data.balances:
-            if node.getAttachedValidator(
-                node.chainDag.headState.data.data, ValidatorIndex(idx)) != nil:
-              balance += b
-          formatGwei(balance)
+          formatGwei(node.attachedValidatorBalanceTotal)
 
         of "sync_status":
           if isNil(node.syncManager):
@@ -1110,6 +1115,143 @@ when hasPrompt:
       # var t: Thread[ptr Prompt]
       # createThread(t, processPromptCommands, addr p)
 
+proc handleValidatorExitCommand(config: BeaconNodeConf) {.async.} =
+  let port = try:
+    let value = parseInt(config.rpcUrlForExit.port)
+    if value < Port.low.int or value > Port.high.int:
+      raise newException(ValueError,
+        "The port number must be between " & $Port.low & " and " & $Port.high)
+    Port value
+  except CatchableError as err:
+    fatal "Invalid port number", err = err.msg
+    quit 1
+
+  let rpcClient = newRpcHttpClient()
+
+  try:
+    await connect(rpcClient, config.rpcUrlForExit.hostname, port)
+  except CatchableError as err:
+    fatal "Failed to connect to the beacon node RPC service", err = err.msg
+    quit 1
+
+  let (validator, validatorIdx, status, balance) = try:
+    await rpcClient.get_v1_beacon_states_stateId_validators_validatorId(
+      "head", config.exitedValidator)
+  except CatchableError as err:
+    fatal "Failed to obtain information for validator", err = err.msg
+    quit 1
+
+  let exitAtEpoch = if config.exitAtEpoch.isSome:
+    Epoch config.exitAtEpoch.get
+  else:
+    let headSlot = try:
+      await rpcClient.getBeaconHead()
+    except CatchableError as err:
+      fatal "Failed to obtain the current head slot", err = err.msg
+      quit 1
+    headSlot.epoch
+
+  let
+    validatorsDir = config.validatorsDir
+    validatorKeyAsStr = "0x" & $validator.pubkey
+    keystoreDir = validatorsDir / validatorKeyAsStr
+
+  if not dirExists(keystoreDir):
+    echo "The validator keystores directory '" & config.validatorsDir.string &
+         "' does not contain a keystore for the selected validator with public " &
+         "key '" & validatorKeyAsStr & "'."
+    quit 1
+
+  let signingKey = loadKeystore(
+    validatorsDir,
+    config.secretsDir,
+    validatorKeyAsStr,
+    config.nonInteractive)
+
+  if signingKey.isNone:
+    fatal "Unable to continue without decrypted signing key"
+    quit 1
+
+  let fork = try:
+    await rpcClient.get_v1_beacon_states_fork("head")
+  except CatchableError as err:
+    fatal "Failed to obtain the fork id of the head state", err = err.msg
+    quit 1
+
+  let genesisValidatorsRoot = try:
+    (await rpcClient.get_v1_beacon_genesis()).genesis_validators_root
+  except CatchableError as err:
+    fatal "Failed to obtain the genesis validators root of the network",
+           err = err.msg
+    quit 1
+
+  var signedExit = SignedVoluntaryExit(
+    message: VoluntaryExit(
+      epoch: exitAtEpoch,
+      validator_index: validatorIdx))
+
+  signedExit.signature = get_voluntary_exit_signature(
+    fork, genesisValidatorsRoot, signedExit.message, signingKey.get)
+
+  template ask(prompt: string): string =
+    try:
+      stdout.write prompt, ": "
+      stdin.readLine()
+    except IOError as err:
+      fatal "Failed to read user input from stdin"
+      quit 1
+
+  try:
+    echoP "PLEASE BEWARE!"
+
+    echoP "Publishing a voluntary exit is an irreversible operation! " &
+          "You won't be able to restart again with the same validator."
+
+    echoP "By requesting an exit now, you'll be exempt from penalties " &
+          "stemming from not performing your validator duties, but you " &
+          "won't be able to withdraw your deposited funds for the time " &
+          "being. This means that your funds will be effectively frozen " &
+          "until withdrawals are enabled in a future phase of Eth2."
+
+
+    echoP "To understand more about the Eth2 roadmap, we recommend you " &
+          "have a look at\n" &
+          "https://ethereum.org/en/eth2/#roadmap"
+
+    echoP "You must keep your validator running for at least 5 epochs " &
+          "(32 minutes) after requesting a validator exit, as you will " &
+          "still be required to perform validator duties until your exit " &
+          "has been processed. The number of epochs could be significantly " &
+          "higher depending on how many other validators are queued to exit."
+
+    echoP "As such, we recommend you keep track of your validator's status " &
+          "using an Eth2 block explorer before shutting down your beacon node."
+
+    const
+      confirmation = "I understand the implications of submitting a voluntary exit"
+
+    while true:
+      echoP "To proceed to submitting your voluntary exit, please type '" &
+            confirmation & "' (without the quotes) in the prompt below and " &
+            "press ENTER or type 'q' to quit."
+      echo ""
+
+      let choice = ask "Your choice"
+      if choice == "q":
+        quit 0
+      elif choice == confirmation:
+        let success = await rpcClient.post_v1_beacon_pool_voluntary_exits(signedExit)
+        if success:
+          echo "Successfully published voluntary exit for validator " &
+                $validatorIdx & "(" & validatorKeyAsStr[0..9] & ")."
+          quit 0
+        else:
+          echo "The voluntary exit was not submitted successfully. Please try again."
+          quit 1
+  except CatchableError as err:
+    fatal "Failed to send the signed exit message to the beacon node RPC"
+    quit 1
+
 programMain:
   var
     config = makeBannerAndConfig(clientId, BeaconNodeConf)
@@ -1147,7 +1289,7 @@ programMain:
     config.runtimePreset = metadata.runtimePreset
 
     if config.cmd == noCommand:
-      for node in metadata.bootstrapNodes:
+      for node in mainnetMetadata.bootstrapNodes:
         config.bootstrapNodes.add node
 
       if metadata.genesisData.len > 0:
@@ -1170,21 +1312,27 @@ programMain:
     checkForIncompatibleOption "deposit-contract-block", depositContractDeployedAt
     config.depositContractAddress = some metadata.depositContractAddress
     config.depositContractDeployedAt = some metadata.depositContractDeployedAt
-
     eth1Network = metadata.eth1Network
   else:
     config.runtimePreset = defaultRuntimePreset
     when const_preset == "mainnet":
-      if config.depositContractAddress.isNone:
+      if config.cmd == noCommand:
+        # TODO Remove the ability to override the depositContractAddress
+        #      on the command line in favour of always requiring a custom
+        #      nework file. We have to do this, because any user setting
+        #      would conflict with the default choice of 'mainnet' as a
+        #      --network value.
         config.depositContractAddress =
           some mainnetMetadata.depositContractAddress
-      if config.depositContractDeployedAt.isNone:
         config.depositContractDeployedAt =
           some mainnetMetadata.depositContractDeployedAt
 
-      genesisStateContents = newClone mainnetMetadata.genesisData
-      genesisDepositsSnapshotContents = newClone mainnetMetadata.genesisDepositsSnapshot
-      eth1Network = some mainnet
+        for node in mainnetMetadata.bootstrapNodes:
+          config.bootstrapNodes.add node
+
+        genesisStateContents = newClone mainnetMetadata.genesisData
+        genesisDepositsSnapshotContents = newClone mainnetMetadata.genesisDepositsSnapshot
+        eth1Network = some mainnet
 
   # Single RNG instance for the application - will be seeded on construction
   # and avoid using system resources (such as urandom) after that
@@ -1295,6 +1443,7 @@ programMain:
 
   of deposits:
     case config.depositsCmd
+    #[
     of DepositsCmd.create:
       var seed: KeySeed
       defer: burnMem(seed)
@@ -1372,15 +1521,32 @@ programMain:
         fatal "Failed to create launchpad deposit data file", err = err.msg
         quit 1
 
-    of DepositsCmd.`import`:
-      importKeystoresFromDir(
-        rng[],
-        config.importedDepositsDir.string,
-        config.validatorsDir, config.secretsDir)
-
     of DepositsCmd.status:
       echo "The status command is not implemented yet"
       quit 1
+
+    #]#
+    of DepositsCmd.`import`:
+      let validatorKeysDir = if config.importedDepositsDir.isSome:
+        config.importedDepositsDir.get
+      else:
+        let cwd = os.getCurrentDir()
+        if dirExists(cwd / "validator_keys"):
+          InputDir(cwd / "validator_keys")
+        else:
+          echo "The default search path for validator keys is a sub-directory " &
+               "named 'validator_keys' in the current working directory. Since " &
+               "no such directory exists, please either provide the correct path" &
+               "as an argument or copy the imported keys in the expected location."
+          quit 1
+
+      importKeystoresFromDir(
+        rng[],
+        validatorKeysDir.string,
+        config.validatorsDir, config.secretsDir)
+
+    of DepositsCmd.exit:
+      waitFor handleValidatorExitCommand(config)
 
   of wallets:
     case config.walletsCmd:
@@ -1442,3 +1608,4 @@ programMain:
 
     of RecordCmd.print:
       echo $config.recordPrint
+

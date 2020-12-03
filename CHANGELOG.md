@@ -1,4 +1,85 @@
-2020-11-20 v1.0.0-rc1
+2020-12-02 v1.0.1
+=================
+
+A point release fixing a number of issues reported after the Mainnet launch.
+
+New additions:
+
+* Better pacing of our Eth1 syncing requests less likely to go over the
+  maximum allowed burst rates with the Infura free plans. More resiliency
+  in case of errors.
+
+We've fixed:
+
+* A crash reported by multiple users with the following error message:
+  "Only one concurrent read allowed".
+
+* An error in the default configuration preventing the node from discovering
+  peers on mainnet unless `--network=mainnet` was explicitly specified on the
+  command-line.
+
+* An incorrect value for the fractional part of your ETH balance in the
+  Nimbus status bar.
+
+* An issue that may cause the Eth1 syncing process to get stuck before
+  reaching the head of the chain.
+
+* Unnecessary network traffic related to GossipSub `IHAVE`.
+
+* Incorrect gossipsub pruning which could result in messages getting lost.
+
+* An issue where an excessively long graffiti string could cause a crash
+  upon startup.
+
+* A Linux-only issue causing the `deposits import` command to ignore its
+  supplied arguments.
+
+
+2020-11-29 v1.0.0-stateofus
+===========================
+
+As promised, a slightly more polished release before Mainnet launch ✨
+
+Please make sure you update to this release before Eth2 genesis this
+Tuesday (December 1 12:00:23 UTC), as it contains some important improvements.
+
+New additions:
+
+* Updated list of bootstrap nodes for Mainnet.
+
+* Prometheus metrics for validator balances. The beacon node will also
+  display the total balance of all attached validators in the status
+  footer by default.
+
+* `deposits import` now automagically finds the `validator_keys` directory
+  produced by the `eth2.0-deposit-cli` if it is located in the same working
+  directory.
+
+* A `deposits exit` command for submitting a voluntary validator exit.
+
+* A `record` CLI command for inspecting and creating ENR records.
+
+* An `--agent-string` option for specifying how Nimbus will present itself
+  in LibP2P messages. The default value is now `nimbus`.
+
+* New RPC calls to track node and config status. Specifically, a JSON-RCP
+  call for inspecting the active config preset (`get_v1_config_spec`).
+
+We've fixed:
+
+* Inaccurate peer counts (an occasional mismatch between the number of
+  syncing peers and GossipSub peers) -- the default peer limit has been
+  increased to maintain a healthy gossip mesh.
+
+* High bandwidth usage of GossipSub (due to sub-optimal caching and lack
+  of limits in the IWANT/IHAVE exchange messages) -- we're now using the
+  latest spec GossipSub parameters.
+
+* High sync memory footprint -- we've reduced the number of sync workers
+  from 20 to 10 (note, this should not affect sync speed).
+
+
+2020-11-25 v1.0.0-rc1
 =====================
 
 We're happy to join the other client teams in announcing our `v1.0.0` release
@@ -38,7 +119,7 @@ more validators connect to Mainnet.
 
 * Unnecessary copy/memory alloc when loading DbSeq entries.
 
-* A block production issue affecting clients that hadn't finished downloading the latest deposits. 
+* A block production issue affecting clients that hadn't finished downloading the latest deposits.
 
 
 2020-11-20 v0.6.6

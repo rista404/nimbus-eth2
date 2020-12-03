@@ -11,10 +11,12 @@ import
   json_serialization, json_serialization/std/[net, options],
   chronos, chronicles, metrics,
   # TODO: create simpler to use libp2p modules that use re-exports
-  libp2p/[switch, standard_setup, peerinfo,
+  libp2p/[switch, peerinfo,
           multiaddress, multicodec, crypto/crypto, crypto/secp,
           protocols/identify, protocols/protocol],
-  libp2p/protocols/secure/[secure, secio],
+  libp2p/muxers/muxer, libp2p/muxers/mplex/mplex,
+  libp2p/transports/[transport, tcptransport],
+  libp2p/protocols/secure/[secure, noise],
   libp2p/protocols/pubsub/[pubsub, rpc/message, rpc/messages],
   libp2p/transports/tcptransport,
   libp2p/stream/connection,
@@ -257,22 +259,22 @@ declareCounter nbc_gossip_messages_sent,
 declareCounter nbc_gossip_messages_received,
   "Number of gossip messages received by this peer"
 
-declarePublicCounter nbc_successful_dials,
+declareCounter nbc_successful_dials,
   "Number of successfully dialed peers"
 
-declarePublicCounter nbc_failed_dials,
+declareCounter nbc_failed_dials,
   "Number of dialing attempts that failed"
 
-declarePublicCounter nbc_timeout_dials,
+declareCounter nbc_timeout_dials,
   "Number of dialing attempts that exceeded timeout"
 
-declarePublicGauge nbc_peers,
+declareGauge nbc_peers,
   "Number of active libp2p peers"
 
-declarePublicCounter nbc_successful_discoveries,
+declareCounter nbc_successful_discoveries,
   "Number of successfull discoveries"
 
-declarePublicCounter nbc_failed_discoveries,
+declareCounter nbc_failed_discoveries,
   "Number of failed discoveries"
 
 const delayBuckets = [1.0, 5.0, 10.0, 20.0, 40.0, 60.0]
@@ -309,10 +311,13 @@ template remote*(peer: Peer): untyped =
 proc openStream(node: Eth2Node,
                 peer: Peer,
                 protocolId: string): Future[Connection] {.async.} =
+  # When dialling here, we do not provide addresses - all new connection
+  # attempts are handled via `connect` which also takes into account
+  # reconnection timeouts
   let
     protocolId = protocolId & "ssz_snappy"
     conn = await dial(
-      node.switch, peer.info.peerId, peer.info.addrs, protocolId)
+      node.switch, peer.info.peerId, protocolId)
 
   # libp2p may replace peerinfo ref sometimes, so make sure we have a recent
   # one
@@ -663,7 +668,7 @@ proc handleIncomingStream(network: Eth2Node,
     case peer.connectionState
     of Disconnecting, Disconnected, None:
       # We got incoming stream request while disconnected or disconnecting.
-      warn "Got incoming request from disconnected peer", peer = peer,
+      debug "Got incoming request from disconnected peer", peer = peer,
            message = msgName
       await conn.closeWithEOF()
       return
@@ -908,10 +913,15 @@ proc runDiscoveryLoop*(node: Eth2Node) {.async.} =
           new_peers = newPeers
 
     if newPeers == 0:
-      if node.peerPool.lenCurrent() <= node.wantedPeers shr 2:
-        warn "Less than 25% wanted peers and could not discover new nodes",
-              discovered = len(discoveredNodes), new_peers = newPeers,
-              wanted_peers = node.wantedPeers
+      let currentPeers = node.peerPool.lenCurrent()
+      if currentPeers <= node.wantedPeers shr 2: #  25%
+        notice "Peer count low, no new peers discovered",
+          discovered = len(discoveredNodes), new_peers = newPeers,
+          current_peers = currentPeers, wanted_peers = node.wantedPeers
+      elif currentPeers <= node.wantedPeers shr 3: # 12.5 %
+        warn "Peer count low, no new peers discovered",
+          discovered = len(discoveredNodes), new_peers = newPeers,
+          current_peers = currentPeers, wanted_peers = node.wantedPeers
       await sleepAsync(5.seconds)
     else:
       await sleepAsync(1.seconds)
@@ -1499,6 +1509,25 @@ func msgIdProvider(m: messages.Message): seq[byte] =
   except CatchableError:
     gossipId(m.data, false)
 
+proc newBeaconSwitch*(conf: BeaconNodeConf, seckey: PrivateKey,
+                      address: MultiAddress,
+                      rng: ref BrHmacDrbgContext): Switch =
+  proc createMplex(conn: Connection): Muxer =
+    Mplex.init(conn, inTimeout = 5.minutes, outTimeout = 5.minutes)
+
+  let
+    peerInfo = PeerInfo.init(seckey, [address])
+    mplexProvider = newMuxerProvider(createMplex, MplexCodec)
+    transports = @[Transport(TcpTransport.init({ServerFlags.ReuseAddr}))]
+    muxers = {MplexCodec: mplexProvider}.toTable
+    secureManagers = [Secure(newNoise(rng, seckey))]
+
+  peerInfo.agentVersion = conf.agentString
+
+  let identify = newIdentify(peerInfo)
+
+  newSwitch(peerInfo, transports, identify, muxers, secureManagers)
+
 proc createEth2Node*(rng: ref BrHmacDrbgContext,
                      conf: BeaconNodeConf,
                      netKeys: KeyPair,
@@ -1510,18 +1539,13 @@ proc createEth2Node*(rng: ref BrHmacDrbgContext,
                          else: @[tcpEndPoint(extIp.get(), extTcpPort)]
 
   debug "Initializing networking", hostAddress,
-                                  network_public_key = netKeys.pubkey,
-                                  announcedAddresses
+                                   network_public_key = netKeys.pubkey,
+                                   announcedAddresses
 
   # TODO nim-libp2p still doesn't have support for announcing addresses
   # that are different from the host address (this is relevant when we
   # are running behind a NAT).
-  var switch = newStandardSwitch(some netKeys.seckey, hostAddress,
-                                 transportFlags = {ServerFlags.ReuseAddr},
-                                 secureManagers = [
-                                   SecureProtocol.Noise, # Only noise in ETH2!
-                                 ],
-                                 rng = rng)
+  var switch = newBeaconSwitch(conf, netKeys.seckey, hostAddress, rng)
 
   let
     params =

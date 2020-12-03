@@ -31,7 +31,7 @@ contract(DepositContract):
 
 const
   web3Timeouts = 60.seconds
-  hasDepositRootChecks = true # defined(has_deposit_root_checks)
+  hasDepositRootChecks = defined(has_deposit_root_checks)
   hasGenesisDetection* = defined(has_genesis_detection)
 
 type
@@ -83,8 +83,9 @@ type
 
   Web3DataProviderRef* = ref Web3DataProvider
 
-  CorruptDataProvider = object of CatchableError
-  DataProviderTimeout = object of CatchableError
+  DataProviderFailure = object of CatchableError
+  CorruptDataProvider = object of DataProviderFailure
+  DataProviderTimeout = object of DataProviderFailure
 
   DisconnectHandler* = proc () {.gcsafe, raises: [Defect].}
 
@@ -213,9 +214,43 @@ func hash*(x: Eth1Data): Hash =
 template hash*(x: Eth1Block): Hash =
   hash(x.voteData)
 
+template awaitWithRetries[T](lazyFutExpr: Future[T],
+                             retries = 3,
+                             timeout = web3Timeouts): untyped =
+  const
+    reqType = astToStr(lazyFutExpr)
+
+  var
+    retryDelayMs = 16000
+    f: Future[T]
+    attempts = 0
+
+  while true:
+    f = lazyFutExpr
+    yield f or sleepAsync(timeout)
+    if not f.finished:
+      await cancelAndWait(f)
+    elif f.failed:
+      if f.error[] of Defect:
+        raise f.error
+      else:
+        debug "Web3 request failed", req = reqType, err = f.error.msg
+    else:
+      break
+
+    inc attempts
+    if attempts >= retries:
+      raise newException(DataProviderFailure,
+        reqType & " failed " & $retries & " times")
+
+    await sleepAsync(chronos.milliseconds(retryDelayMs))
+    retryDelayMs *= 2
+
+  read(f)
+
 proc close*(p: Web3DataProviderRef): Future[void] {.async.} =
   if p.blockHeadersSubscription != nil:
-    await p.blockHeadersSubscription.unsubscribe()
+    awaitWithRetries(p.blockHeadersSubscription.unsubscribe())
 
   await p.web3.close()
 
@@ -273,19 +308,20 @@ proc depositEventsToBlocks(depositsList: JsonNode): seq[Eth1Block] =
       signature: ValidatorSig.init(array[96, byte](signature)))
 
 proc fetchTimestamp(p: Web3DataProviderRef, blk: Eth1Block) {.async.} =
-  let web3block = await p.getBlockByHash(blk.voteData.block_hash.asBlockHash)
+  let web3block = awaitWithRetries(
+    p.getBlockByHash(blk.voteData.block_hash.asBlockHash))
   blk.timestamp = Eth1BlockTimestamp web3block.timestamp
 
-when hasDepositRootChecks:
-  type
-    DepositContractDataStatus = enum
-      Fetched
-      VerifiedCorrect
-      DepositRootIncorrect
-      DepositRootUnavailable
-      DepositCountIncorrect
-      DepositCountUnavailable
+type
+  DepositContractDataStatus = enum
+    Fetched
+    VerifiedCorrect
+    DepositRootIncorrect
+    DepositRootUnavailable
+    DepositCountIncorrect
+    DepositCountUnavailable
 
+when hasDepositRootChecks:
   const
     contractCallTimeout = seconds(60)
 
@@ -333,12 +369,12 @@ proc onBlockHeaders*(p: Web3DataProviderRef,
                      blockHeaderHandler: BlockHeaderHandler,
                      errorHandler: SubscriptionErrorHandler) {.async.} =
   if p.blockHeadersSubscription != nil:
-    await p.blockHeadersSubscription.unsubscribe()
+    awaitWithRetries(p.blockHeadersSubscription.unsubscribe())
 
   info "Waiting for new Eth1 block headers"
 
-  p.blockHeadersSubscription = await p.web3.subscribeForBlockHeaders(
-    blockHeaderHandler, errorHandler)
+  p.blockHeadersSubscription = awaitWithRetries(
+    p.web3.subscribeForBlockHeaders(blockHeaderHandler, errorHandler))
 
 {.push raises: [Defect].}
 
@@ -389,6 +425,10 @@ proc pruneOldBlocks(m: Eth1Monitor, depositIndex: uint64) =
       eth1Block: lastBlock.voteData.block_hash,
       depositContractState: m.eth2FinalizedDepositsMerkleizer.toDepositContractState)
 
+    debug "Eth1 blocks pruned",
+           newTailBlock = lastBlock.voteData.block_hash,
+           depositsCount = lastBlock.voteData.deposit_count
+
 proc advanceMerkleizer(eth1Chain: Eth1Chain,
                        merkleizer: var DepositsMerkleizer,
                        depositIndex: uint64): bool =
@@ -434,39 +474,61 @@ proc getDepositsRange(eth1Chain: Eth1Chain, first, last: uint64): seq[Deposit] =
       if globalIdx >= first and globalIdx < last:
         result.add Deposit(data: blk.deposits[i])
 
-# https://github.com/ethereum/eth2.0-specs/blob/v1.0.0/specs/phase0/validator.md#get_eth1_data
-proc getBlockProposalData*(m: Eth1Monitor,
-                           state: BeaconState,
-                           finalizedEth1Data: Eth1Data,
-                           finalizedStateDepositIndex: uint64): BlockProposalEth1Data =
-  let finalizedEth1Block = m.eth1Chain.findBlock(finalizedEth1Data)
-  let hasLatestDeposits = if finalizedEth1Block != nil:
-    if finalizedEth1Block.voteData.deposit_root == finalizedEth1Data.deposit_root:
-      finalizedEth1Block.voteDataVerified = true
+proc lowerBound(chain: Eth1Chain, depositCount: uint64): Eth1Block =
+  # TODO: This can be replaced with a proper binary search in the
+  #       future, but the `algorithm` module currently requires an
+  #       `openArray`, which the `deques` module can't provide yet.
+  for eth1Block in chain.blocks:
+    if eth1Block.voteData.deposit_count > depositCount:
+      return
+    result = eth1Block
+
+proc trackFinalizedState*(m: Eth1Monitor,
+                          finalizedEth1Data: Eth1Data,
+                          finalizedStateDepositIndex: uint64): bool =
+  # Returns true if the Eth1Monitor is synced to the finalization point
+  if m.eth1Chain.blocks.len == 0:
+    debug "Eth1 chain not initialized"
+    return false
+
+  let latest = m.eth1Chain.blocks.peekLast
+  if latest.voteData.deposit_count < finalizedEth1Data.deposit_count:
+    debug "Eth1 chain not synced",
+          ourDepositsCount = latest.voteData.deposit_count,
+          targetDepositsCount = finalizedEth1Data.deposit_count
+    return false
+
+  let matchingBlock = m.eth1Chain.lowerBound(finalizedEth1Data.deposit_count)
+  result = if matchingBlock != nil:
+    if matchingBlock.voteData.deposit_root == finalizedEth1Data.deposit_root:
+      matchingBlock.voteDataVerified = true
       true
     else:
       error "Corrupted deposits history detected",
+            depositsCount = finalizedEth1Data.deposit_count,
             targetDepositsRoot = finalizedEth1Data.deposit_root,
-            targetDepositsCount = finalizedEth1Data.deposit_count,
-            ourDepositsCount = finalizedEth1Block.voteData.deposit_count,
-            ourDepositsRoot = finalizedEth1Block.voteData.deposit_root
+            ourDepositsRoot = matchingBlock.voteData.deposit_root
       false
   else:
-    debug "Finalized Eth1 checkpoint not present in local chain",
+    error "The Eth1 chain is in inconsistent state",
           checkpointHash = finalizedEth1Data.block_hash,
           checkpointDeposits = finalizedEth1Data.deposit_count,
           localChainStart = shortLog(m.eth1Chain.blocks.peekFirst),
           localChainEnd = shortLog(m.eth1Chain.blocks.peekLast)
     false
 
-  if hasLatestDeposits:
-    # TODO(zah)
-    # To make block proposal cheaper, we can perform this action more regularly
-    # (e.g. in BeaconNode.onSlot). But keep in mind that this action needs to be
-    # performed only when there are validators attached to the node.
+  if result:
     m.pruneOldBlocks(finalizedStateDepositIndex)
 
-  let periodStart = voting_period_start_time(state)
+# https://github.com/ethereum/eth2.0-specs/blob/v1.0.0/specs/phase0/validator.md#get_eth1_data
+proc getBlockProposalData*(m: Eth1Monitor,
+                           state: BeaconState,
+                           finalizedEth1Data: Eth1Data,
+                           finalizedStateDepositIndex: uint64): BlockProposalEth1Data =
+  let
+    periodStart = voting_period_start_time(state)
+    hasLatestDeposits = m.trackFinalizedState(finalizedEth1Data,
+                                              finalizedStateDepositIndex)
 
   var otherVotesCountTable = initCountTable[Eth1Data]()
   for vote in state.eth1_data_votes:
@@ -563,7 +625,7 @@ proc init*(T: type Eth1Monitor,
 
     if eth1Network.isSome:
       let
-        providerNetwork = await web3.provider.net_version()
+        providerNetwork = awaitWithRetries web3.provider.net_version()
         expectedNetwork = case eth1Network.get
           of mainnet: "1"
           of rinkeby: "4"
@@ -614,6 +676,7 @@ proc syncBlockRange(m: Eth1Monitor,
       depositLogs: JsonNode = nil
       blocksPerRequest = 5000'u64 # This is roughly a day of Eth1 blocks
       maxBlockNumberRequested: Eth1BlockNumber
+      backoff = 100
 
     while true:
       maxBlockNumberRequested = min(toBlock, currentBlock + blocksPerRequest - 1)
@@ -626,9 +689,14 @@ proc syncBlockRange(m: Eth1Monitor,
 
       debug "Obtaining deposit log events",
             fromBlock = currentBlock,
-            toBlock = maxBlockNumberRequested
+            toBlock = maxBlockNumberRequested,
+            backoff
 
       debug.logTime "Deposit logs obtained":
+        # Reduce all request rate until we have a more general solution
+        # for dealing with Infura's rate limits
+        await sleepAsync(milliseconds(backoff))
+
         let jsonLogsFut = m.dataProvider.ns.getJsonLogs(
           DepositEvent,
           fromBlock = some blockId(currentBlock),
@@ -640,45 +708,42 @@ proc syncBlockRange(m: Eth1Monitor,
             retryOrRaise newException(DataProviderTimeout,
               "Request time out while obtaining json logs")
         except CatchableError as err:
+          debug "Request for deposit logs failed", err = err.msg
+          backoff = (backoff * 3) div 2
           retryOrRaise err
 
       currentBlock = maxBlockNumberRequested + 1
       break
 
-    debug.logTime "Deposits grouped in blocks":
-      let blocksWithDeposits = depositEventsToBlocks(depositLogs)
-
-    var
-      # A temporary sequence for stroing all new blocks aiming to make the
-      # updates to m.eth1Chain more atomic/transactional.
-      blocksToAddToChain = newSeq[Eth1Block]()
+    let blocksWithDeposits = depositEventsToBlocks(depositLogs)
 
     for i in 0 ..< blocksWithDeposits.len:
       let blk = blocksWithDeposits[i]
 
-      debug.logTime "New deposit_root computed":
-        for deposit in blk.deposits:
-          merkleizer[].addChunk hash_tree_root(deposit).data
+      for deposit in blk.deposits:
+        merkleizer[].addChunk hash_tree_root(deposit).data
 
-        blk.voteData.deposit_count = merkleizer[].getChunkCount
-        blk.voteData.deposit_root = merkleizer[].getDepositsRoot
+      blk.voteData.deposit_count = merkleizer[].getChunkCount
+      blk.voteData.deposit_root = merkleizer[].getDepositsRoot
 
       if blk.number > fullSyncFromBlock:
-        let lastBlock = if blocksToAddToChain.len > 0: blocksToAddToChain[^1]
-                        else: m.eth1Chain.blocks.peekLast
+        let lastBlock = m.eth1Chain.blocks.peekLast
         for n in max(lastBlock.number + 1, fullSyncFromBlock) ..< blk.number:
-          let blockWithoutDeposits = await m.dataProvider.getBlockByNumber(n)
-          blocksToAddToChain.add(
+          debug "Obtaining block without deposits", blockNum = n
+          let blockWithoutDeposits = awaitWithRetries(
+            m.dataProvider.getBlockByNumber(n))
+
+          m.eth1Chain.addBlock(
             lastBlock.makeSuccessorWithoutDeposits(blockWithoutDeposits))
 
-      blocksToAddToChain.add blk
+      m.eth1Chain.addBlock blk
 
     if blocksWithDeposits.len > 0:
       let lastIdx = blocksWithDeposits.len - 1
       template lastBlock: auto = blocksWithDeposits[lastIdx]
 
       let status = when hasDepositRootChecks:
-        await m.dataProvider.fetchDepositContractData(lastBlock)
+        awaitWithRetries m.dataProvider.fetchDepositContractData(lastBlock)
       else:
         DepositRootUnavailable
 
@@ -697,17 +762,13 @@ proc syncBlockRange(m: Eth1Monitor,
         raise newException(CorruptDataProvider,
           "The deposit log events disagree with the deposit contract state")
       of VerifiedCorrect:
-        for blk in blocksToAddToChain:
-          blk.voteDataVerified = true
+        lastBlock.voteDataVerified = true
       else:
         discard
 
       notice "Eth1 sync progress",
         blockNumber = lastBlock.number,
         depositsProcessed = lastBlock.voteData.deposit_count
-
-    for blk in blocksToAddToChain:
-      m.eth1Chain.addBlock blk
 
     when hasGenesisDetection:
       if m.genesisStateFut != nil:
@@ -730,7 +791,8 @@ proc syncBlockRange(m: Eth1Monitor,
 
         if maxBlockNumberRequested == toBlock and
            (m.eth1Chain.blocks.len == 0 or lastBlock.number != toBlock):
-          let web3Block = await m.dataProvider.getBlockByNumber(toBlock)
+          let web3Block = awaitWithRetries(
+            m.dataProvider.getBlockByNumber(toBlock))
 
           debug "Latest block doesn't hold deposits. Obtaining it",
                  ts = web3Block.timestamp.uint64,
@@ -738,14 +800,14 @@ proc syncBlockRange(m: Eth1Monitor,
 
           m.eth1Chain.addBlock lastBlock.makeSuccessorWithoutDeposits(web3Block)
         else:
-          await m.dataProvider.fetchTimestamp(lastBlock)
+          awaitWithRetries m.dataProvider.fetchTimestamp(lastBlock)
 
         var genesisBlockIdx = m.eth1Chain.blocks.len - 1
         if m.isAfterMinGenesisTime(m.eth1Chain.blocks[genesisBlockIdx]):
           for i in 1 ..< eth1Blocks.len:
             let idx = (m.eth1Chain.blocks.len - 1) - i
             let blk = m.eth1Chain.blocks[idx]
-            await m.dataProvider.fetchTimestamp(blk)
+            awaitWithRetries m.dataProvider.fetchTimestamp(blk)
             if m.isGenesisCandidate(blk):
               genesisBlockIdx = idx
             else:
@@ -767,11 +829,12 @@ proc syncBlockRange(m: Eth1Monitor,
           if genesisBlockIdx > 0:
             let genesisParent = m.eth1Chain.blocks[genesisBlockIdx - 1]
             if genesisParent.timestamp == 0:
-              await m.dataProvider.fetchTimestamp(genesisParent)
+              awaitWithRetries m.dataProvider.fetchTimestamp(genesisParent)
             if m.hasEnoughValidators(genesisParent) and
                genesisBlock.number - genesisParent.number > 1:
-              genesisBlock = await m.findGenesisBlockInRange(genesisParent,
-                                                             genesisBlock)
+              genesisBlock = awaitWithRetries(
+                m.findGenesisBlockInRange(genesisParent, genesisBlock))
+
           m.signalGenesis m.createGenesisState(genesisBlock)
 
 proc startEth1Syncing(m: Eth1Monitor) {.async.} =
@@ -781,11 +844,8 @@ proc startEth1Syncing(m: Eth1Monitor) {.async.} =
 
   m.eth2FinalizedDepositsMerkleizer = m.knownStart.createMerkleizer
 
-  let startBlock = awaitWithTimeout(
-    m.dataProvider.getBlockByHash(m.knownStart.eth1Block.asBlockHash),
-    web3Timeouts):
-      error "Eth1 sync failed to obtain information about the starting block in time"
-      return
+  let startBlock = awaitWithRetries(
+    m.dataProvider.getBlockByHash(m.knownStart.eth1Block.asBlockHash))
 
   doAssert m.eth1Chain.blocks.len == 0
   m.eth1Chain.addBlock Eth1Block(
@@ -797,6 +857,8 @@ proc startEth1Syncing(m: Eth1Monitor) {.async.} =
 
   var eth1SyncedTo = Eth1BlockNumber startBlock.number
   var scratchMerkleizer = newClone(copy m.eth2FinalizedDepositsMerkleizer)
+
+  debug "Starting Eth1 syncing", `from` = shortLog(m.eth1Chain.blocks[0])
 
   while true:
     if bnStatus == BeaconNodeStatus.Stopping:
@@ -868,7 +930,8 @@ proc start*(m: Eth1Monitor) =
 proc getEth1BlockHash*(url: string, blockId: RtBlockIdentifier): Future[BlockHash] {.async.} =
   let web3 = await newWeb3(url)
   try:
-    let blk = await web3.provider.eth_getBlockByNumber(blockId, false)
+    let blk = awaitWithRetries(
+      web3.provider.eth_getBlockByNumber(blockId, false))
     return blk.hash
   finally:
     await web3.close()
@@ -894,7 +957,8 @@ when hasGenesisDetection:
           var blk: BlockObject
           while true:
             try:
-              blk = await dataProvider.getBlockByNumber(depositContractDeployedAt.number)
+              blk = awaitWithRetries(
+                dataProvider.getBlockByNumber(depositContractDeployedAt.number))
               break
             except CatchableError as err:
               error "Failed to obtain details for the starting block " &
@@ -992,7 +1056,8 @@ when hasGenesisDetection:
                           float(endBlock.number - startBlock.number)
         blocksToJump = max(float(MIN_GENESIS_TIME - startBlockTime) / secondsPerBlock, 1.0)
         candidateNumber = min(endBlock.number - 1, startBlock.number + blocksToJump.uint64)
-        candidateBlock = await m.dataProvider.getBlockByNumber(candidateNumber)
+        candidateBlock = awaitWithRetries(
+          m.dataProvider.getBlockByNumber(candidateNumber))
 
       var candidateAsEth1Block = Eth1Block(number: candidateBlock.number.uint64,
                                            timestamp: candidateBlock.timestamp.uint64,

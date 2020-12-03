@@ -1,11 +1,13 @@
 import
-  tables, json, streams,
-  chronos, chronicles,
-  spec/[datatypes, crypto, digest, signatures, helpers],
-  beacon_node_types,
+  std/[tables, json, streams],
+  chronos, chronicles, metrics,
   json_serialization/std/[sets, net],
-  validator_slashing_protection,
-  eth/db/[kvstore, kvstore_sqlite3]
+  eth/db/[kvstore, kvstore_sqlite3],
+  ./spec/[datatypes, crypto, digest, signatures, helpers],
+  ./beacon_node_types, validator_slashing_protection
+
+declareGauge validators,
+  "Number of validators attached to the beacon node"
 
 func init*(T: type ValidatorPool,
             slashingProtectionDB: SlashingProtectionDB): T =
@@ -21,18 +23,24 @@ template count*(pool: ValidatorPool): int =
 
 proc addLocalValidator*(pool: var ValidatorPool,
                         pubKey: ValidatorPubKey,
-                        privKey: ValidatorPrivKey) =
+                        privKey: ValidatorPrivKey,
+                        index: Option[ValidatorIndex]) =
   let v = AttachedValidator(pubKey: pubKey,
+                            index: index,
                             kind: inProcess,
                             privKey: privKey)
   pool.validators[pubKey] = v
   notice "Local validator attached", pubKey, validator = shortLog(v)
+
+  validators.set(pool.count().int64)
 
 proc addRemoteValidator*(pool: var ValidatorPool,
                          pubKey: ValidatorPubKey,
                          v: AttachedValidator) =
   pool.validators[pubKey] = v
   notice "Remote validator attached", pubKey, validator = shortLog(v)
+
+  validators.set(pool.count().int64)
 
 proc getValidator*(pool: ValidatorPool,
                    validatorKey: ValidatorPubKey): AttachedValidator =

@@ -1,6 +1,4 @@
-# Metrics and pretty pictures
-
-> ⚠️  This page concerns the Pyrmont testnet. If you have made a mainnet deposit, you do not need to connect to eth2 quite yet. Mainnet [Genesis](https://hackmd.io/@benjaminion/genesis) date has been set to [December 1st](https://blog.ethereum.org/2020/11/04/eth2-quick-update-no-19/). This page will be updated nearer the time.
+# Grafana and Prometheus
 
 In this page we'll cover how to use  Grafana and Prometheus to help you visualise important real-time metrics concerning your validator and/or beacon node.
 
@@ -10,7 +8,7 @@ Grafana is a tool for beautiful dashboard monitoring that works well with Promet
 
 ## Simple metrics
 
-The easiest way to see metrics concerning your validator / node is to build the beacon node with the `NIMFLAGS="-d:insecure"` flag. For example, to enable metrics for a `medalla` validator, run:
+The easiest way to see metrics concerning your validator / node is to build the beacon node with the `NIMFLAGS="-d:insecure"`:
 
 ```
 make NIMFLAGS="-d:insecure" nimbus_beacon_node
@@ -52,14 +50,15 @@ The following steps will take you through how to use Prometheus and Grafana to s
 
 #### 1. Download Prometheus
 
-Download and extract the [latest release](https://prometheus.io/download/) of Prometheus for your platform:
+Use your favourite package manager to download Prometheus -- for example `apt-get install prometheus` on Ubuntu, or `brew install prometheus` on MacOS, should do the trick.
 
-```
-tar xvfz prometheus-*.tar.gz
-cd prometheus-*
-```
+> If you don't use a package manager, you can download the [latest release](https://prometheus.io/download/) of directly from Prometheus website. To extract it, run:
+> 
+> ```
+> tar xvfz prometheus-*.tar.gz
+> cd prometheus-*
+> ```
 
->**Note:** If you use a package manager, you can also download Prometheus that way -- for example `apt-get install prometheus` on Ubuntu, or `brew install prometheus` on MacOS, should do the trick.
 
 #### 2. Copy the binary
 
@@ -73,14 +72,27 @@ cp prometheus-2.20.1.linux-amd64/prometheus /usr/local/bin/
 
 Prometheus relies on a YAML configuration file to let it know where, and how often, to scrape data.
 
-`nimbus-eth2` generates an appropriate configuration file (`prometheseus.yml`) when you build the beacon node. If you're running the `medalla` testnet you'll find this in `build/data/medalla`.
-
-To run Prometheus with the default config file:
+Example config file:
 
 ```
-cd build/data/medalla
+global:
+  scrape_interval: 6s
+
+scrape_configs:
+  - job_name: "nimbus"
+    static_configs:
+      - targets: ['127.0.0.1:8008']
+        labels:
+          node: '0'
+
+```
+
+Save the above as `prometheus.yml` in the `nimbus-eth2` repo.
+
+Then run Prometheus:
+
+```
 prometheus --config.file=./prometheus.yml --storage.tsdb.path=./prometheus
-# when starting multiple nodes at the same time, just use the config file from the one with the highest ID
 ```
 
 #### 4. Download Grafana
@@ -160,11 +172,3 @@ And voila! That's all there is to it :)
 
 TODO
 
-### Discord
-
-TODO
-
-## Additional resources
-
-- [Guide to Staking on Ethereum 2.0 (Ubuntu/Medalla/Nimbus)](https://medium.com/@SomerEsat/guide-to-staking-on-ethereum-2-0-ubuntu-medalla-nimbus-5f4b2b0f2d7c): a guide by an outside contributer that contains some very informative sections on both Prometheus and Grafana. We strongly recommend reading through the relevant sections if you're using a linux device and/or using `systemd`.
-- [Our dashboard](https://metrics.status.im/d/pgeNfj2Wz23/nimbus-testnet3?orgId=1&from=now-6h&to=now&var-container=beacon-node-testnet3&var-instance=node-03.aws-eu-central-1a.nimbus.test) (AWS Medalla nodes)

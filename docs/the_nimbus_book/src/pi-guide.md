@@ -1,9 +1,11 @@
-# Validating with a Raspberry Pi
+# Validating with a Raspberry Pi: Guide
 
 <blockquote class="twitter-tweet"><p lang="en" dir="ltr">I expect the new Raspberry Pi 4 (4GB RAM option, external SSD) to handle an Eth2 validator node without breaking a sweat. That&#39;s $100 of hardware running at 10 Watts to support a 32 ETH node (currently ~$10K stake).</p>&mdash; Justin Ðrake (@drakefjustin) <a href="https://twitter.com/drakefjustin/status/1143091047058366465?ref_src=twsrc%5Etfw">June 24, 2019</a></blockquote> <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
 
 ## Introduction
-This page will take you through how to use your laptop to program your Raspberry Pi, get Nimbus running, and connect to the **Pyrmont testnet** (if this is not something you plan on doing, feel free to [skip ahead](./keep-an-eye.md)).
+This page will take you through how to use your laptop to program your Raspberry Pi, get Nimbus running, and connect to the **Pyrmont testnet**.
+
+
 
 One of the most important aspects of the Raspberry Pi experience is trying to make it as easy as possible to get started. As such, we try our best to explain things from first-principles.
 
@@ -61,18 +63,13 @@ Click on **CHOOSE SD CARD**. You should see a menu pop-up with your SD card list
 
 Click on **WRITE**
 
-![](https://storage.googleapis.com/ethereum-hackmd/upload_0e02be31057745c6b9834a925c54b9d3.png)
+![](https://i.imgur.com/NeOT8pf.png)
 
 Click **YES**
 
 ![](https://storage.googleapis.com/ethereum-hackmd/upload_160208a5bc983165c2a1eb9bffed01c2.png)
 
 Make a cup of coffee :)
-
-### 4c. Boot from external SSD
-
-Follow [this guide](https://www.tomshardware.com/how-to/boot-raspberry-pi-4-usb) to boot your Pi from your SSD. The USB 3 port is the blue port.
-
 
 ### 5. Set up wireless LAN
 
@@ -218,6 +215,30 @@ ssh pi@195.177.101.93
 
 > **Note:** Remember to replace `195.177.101.93` with the IP address of your Pi.
 
+### 10b. Boot from external SSD
+
+Follow [this guide](https://www.tomshardware.com/how-to/boot-raspberry-pi-4-usb) to copy the contents of your SD card over to your SSD, and boot your Pi from your SSD.
+
+> **Tips:**
+>
+> Make sure you connect your SSD the Pi's USB 3 port (the blue port).
+>
+> If your Pi is headless (no monitor attached) you can use the [`rpi-clone`](https://github.com/billw2/rpi-clone) repository to copy the contents of the SD over to the SSD; in a nutshell, replace steps 14 and 15 of the above guide with the following commands (which you should run from the Pi's `home` directory):
+> ```bash
+> git clone https://github.com/billw2/rpi-clone.git 
+> cd rpi-clone
+> sudo cp rpi-clone rpi-clone-setup /usr/local/sbin
+> sudo rpi-clone-setup -t testhostname
+> rpi-clone sda
+> ```
+>
+>For more on `raspi-config`, see [here](https://www.raspberrypi.org/documentation/configuration/raspi-config.md).
+>
+> To shutdown your Pi safely, run `sudo shutdown -h now`
+
+
+Once you're done, `ssh` back into your Pi.
+
 
 ### 11. Install Nimbus dependencies
 
@@ -356,19 +377,30 @@ Enter your own secure websocket (`wss`) [Infura endpoint](./infura-guide.md).
 If you look near the top of the logs printed to your console, you should see confirmation that your beacon node has started, with your local validator attached:
 
 ```
-INF 2020-10-07 17:04:09.213+02:00 Initializing networking                    topics="networking" tid=11688398 file=eth2_network.nim:1335 hostAddress=/ip4/0.0.0.0/tcp/9000 network_public_key=0802122102defb020c8e47dd8f5da89f51ed6c3998aaa0dd59eeb2784e29d47fdbdab69235 announcedAddresses=@[/ip4/195.177.101.93/tcp/9000]
-WRN 2020-10-07 17:04:09.215+02:00 Ignoring invalid bootstrap address         tid=11688398 file=eth2_discovery.nim:45 bootstrapAddr= reason="an empty string is not a valid bootstrap node"
-NOT 2020-10-07 17:04:09.231+02:00 Local validators attached                  topics="beacval" tid=11688398 file=validator_duties.nim:65 count=0
-NOT 2020-10-07 17:04:09.231+02:00 Starting beacon node                       topics="beacnde" tid=11688398 file=nimbus_beacon_node.nim:923 version="0.5.0 (1dec860b)" nim="Nim Compiler Version 1.2.6 [MacOSX: amd64] (bf320ed1)" timeSinceFinalization=0ns head=0814b036:0 finalizedHead=0814b036:0 SLOTS_PER_EPOCH=32 SECONDS_PER_SLOT=12 SPEC_VERSION=0.12.3 dataDir=build/data/shared_pyrmont_0
+INF 2020-12-01 11:25:33.487+01:00 Launching beacon node
+...
+INF 2020-12-01 11:25:34.556+01:00 Loading block dag from database            topics="beacnde" tid=19985314 file=nimbus_beacon_node.nim:198 path=build/data/shared_pyrmont_0/db
+INF 2020-12-01 11:25:35.921+01:00 Block dag initialized
+INF 2020-12-01 11:25:37.073+01:00 Generating new networking key
+...
+NOT 2020-12-01 11:25:45.267+00:00 Local validator attached                   tid=22009 file=validator_pool.nim:33 pubKey=95e3cbe88c71ab2d0e3053b7b12ead329a37e9fb8358bdb4e56251993ab68e46b9f9fa61035fe4cf2abf4c07dfad6c45 validator=95e3cbe8
+...
+NOT 2020-12-01 11:25:59.512+00:00 Eth1 sync progress                         topics="eth1" tid=21914 file=eth1_monitor.nim:705 blockNumber=3836397 depositsProcessed=106147
+NOT 2020-12-01 11:26:02.574+00:00 Eth1 sync progress                         topics="eth1" tid=21914 file=eth1_monitor.nim:705 blockNumber=3841412 depositsProcessed=106391
+...
+INF 2020-12-01 11:26:31.000+00:00 Slot start                                 topics="beacnde" tid=21815 file=nimbus_beacon_node.nim:505 lastSlot=96566 scheduledSlot=96567 beaconTime=1w6d9h53m24s944us774ns peers=7 head=b54486c4:96563 headEpoch=3017 finalized=2f5d12e4:96479 finalizedEpoch=3014
+INF 2020-12-01 11:26:36.285+00:00 Slot end                                   topics="beacnde" tid=21815 file=nimbus_beacon_node.nim:593 slot=96567 nextSlot=96568 head=b54486c4:96563 headEpoch=3017 finalizedHead=2f5d12e4:96479 finalizedEpoch=3014
 ```
 
 To keep track of your syncing progress, have a look at the output at the very bottom of the terminal window in which your validator is running. You should see something like:
 
 ```
-peers: 35 ❯ finalized: ada7228a:8765 ❯ head: b2fe11cd:8767:2 ❯ time: 9900:7 (316807) ❯ sync: wPwwwwwDwwDPwPPPwwww:7:4.0627 (280512)
+peers: 15 ❯ finalized: ada7228a:8765 ❯ head: b2fe11cd:8767:2 ❯ time: 9900:7 (316807) ❯ sync: wPwwwwwDwwDPwPPPwwww:7:1.2313:1.0627:12h01m(280512)
 ```
 
-Keep an eye on the number of peers your currently connected to (in the above case that's `35`), as well as your [sync progress](./keep-an-eye.md#syncing-progress).
+Keep an eye on the number of peers your currently connected to (in the above case that's `15`), as well as your [sync progress](./keep-an-eye.md#syncing-progress).
+
+> **Note:** 15 - 20 peers and an average sync speed of **0.5 - 1.0** blocks per second is normal on `Pyrmont` with a Pi. If you're sync speed is much slower than this, the root of the problem may be your USB3.0 to SSD adapter. See [this post](https://www.raspberrypi.org/forums/viewtopic.php?f=28&t=245931) for a recommended workaround.
 
 ### 20. End ssh session and logout
 
