@@ -1,13 +1,10 @@
 # The Nimbus book
 
->**Note:** This book is very much a living entity. You'll always be able to find the latest version here: [https://status-im.github.io/nimbus-eth2/](https://status-im.github.io/nimbus-eth2/)
+Nimbus is an Ethereum 2.0 client focused on offering the best user experience possible for low-resource devices.
 
+This book explains the ways in which you can use Nimbus to either monitor the eth2 chain or become a fully-fledged validator.
 
-Nimbus is an Ethereum 2.0 client focused on offering the best user experience possible for resource-restricted devices.
-
-This book explains all the ways in which you can use Nimbus to either monitor the eth2 chain or become a fully-fledged validator.
-
-> ⚠️ The reality is that we are very early in the eth2 validating life cycle. Validating is not for everyone yet, and it comes with both risks and responsibilities. It isn't a particularly easy way to make money. You'll need to put effort into updating your software, researching hard-forks, having a robust setup... . As such, you should only stake if you are genuinely interested in securing the protocol.
+> The reality is that we are very early in the eth2 validating life cycle. Validating is not for everyone yet, and it comes with both risks and responsibilities. It isn't a particularly easy way to make money. You'll need to put effort into updating your software, researching hard-forks, having a robust setup... . As such, you should only stake if you are genuinely interested in securing the protocol.
 
 ### Helpful resources
 
@@ -32,19 +29,19 @@ In traditional PoW, block proposers are called **_miners_**, whereas in PoS, the
 
 In a sentence, Nimbus aims to be an ethereum client for resource-restricted devices. 
 
-Because we believe that the largest deployment of Ethereum will be on embedded systems, Nimbus is being designed to perform well on IoT and personal mobile devices, including older smartphones with resource-restricted hardware.
+Because we believe that the largest deployment of Ethereum will be on embedded systems, Nimbus is being designed to perform well on IoT and personal mobile devices, including older smartphones with resource-restriced hardware.
 
 Although Nimbus will support full and archival nodes, its main implementation will be as a light client, with a focus on Proof of Stake and sharding.
 
-All our code is open source; we encourage you to keep track of our activity at [github.com/status-im/nimbus](https://github.com/status-im/nimbus)). You can also keep up to date with our progress through the [Nimbus blog](https://our.status.im/tag/nimbus/).
+All our code is open source; we encourage you to keep track of our activity on [GitHub](https://github.com/status-im/nimbus). You can also keep up to date with our progress through the [Nimbus blog](https://our.status.im/tag/nimbus/).
 
 
-## Get in touch
+### Get in touch
 
-Need help with anything? Join us on [Status](https://join.status.im/nimbus-general) and [Discord](https://discord.gg/9dWwPnG)!
+Need help with anything? Join us on [Status](https://join.status.im/nimbus-general) and [Discord](https://discord.gg/9dWwPnG).
 
 
-## Disclaimer
+### Disclaimer
 
 This documentation assumes Nimbus is in its ideal state. The project is still under active development. Please submit a [Github issue](https://github.com/status-im/nimbus-eth2/issues) if you come across a problem.
 
