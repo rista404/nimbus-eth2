@@ -1602,7 +1602,8 @@ proc subscribe*(node: Eth2Node, topic: string, topicParams: TopicParams) {.async
   proc dummyMsgHandler(topic: string, data: seq[byte]) {.async.} =
     discard
 
-  node.pubsub.topicParams[topic] = topicParams
+  let topicName = topic & "_snappy"
+  node.pubsub.topicParams[topicName] = topicParams
   await node.pubsub.subscribe(topic & "_snappy", dummyMsgHandler)
 
 proc addValidator*[MsgType](node: Eth2Node,
