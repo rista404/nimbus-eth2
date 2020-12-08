@@ -1567,7 +1567,8 @@ proc createEth2Node*(rng: ref BrHmacDrbgContext,
         p.decayInterval = 12.seconds
         p.decayToZero = 0.01
         p.retainScore = 385.seconds
-        p.ipColocationFactorWeight = -53.75
+        # p.ipColocationFactorWeight = -53.75
+        p.ipColocationFactorWeight = 0.0
         p.ipColocationFactorThreshold = 3
         p.behaviourPenaltyWeight = -15.9
         p.behaviourPenaltyDecay = 0.986
