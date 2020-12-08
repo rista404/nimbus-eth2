@@ -368,7 +368,8 @@ func verifyFinalization(node: BeaconNode, slot: Slot) =
     # finalization occurs every slot, to 4 slots vs scheduledSlot.
     doAssert finalizedEpoch + 4 >= epoch
 
-proc installAttestationSubnetHandlers(node: BeaconNode, subnets: set[uint8]) =
+proc installAttestationSubnetHandlers(node: BeaconNode, subnets: set[uint8])
+    {.async} =
   var attestationSubscriptions: seq[Future[void]] = @[]
 
   const topicParams = TopicParams(
@@ -400,14 +401,14 @@ proc installAttestationSubnetHandlers(node: BeaconNode, subnets: set[uint8]) =
     attestationSubscriptions.add(node.network.subscribe(
       getAttestationTopic(node.forkDigest, subnet), topicParams))
 
-  waitFor allFutures(attestationSubscriptions)
+  await allFutures(attestationSubscriptions)
 
   # https://github.com/ethereum/eth2.0-specs/blob/v1.0.0/specs/phase0/p2p-interface.md#metadata
   node.network.metadata.seq_number += 1
   for subnet in subnets:
     node.network.metadata.attnets[subnet] = true
 
-proc cycleAttestationSubnets(node: BeaconNode, slot: Slot) =
+proc cycleAttestationSubnets(node: BeaconNode, slot: Slot) {.async.} =
   static: doAssert RANDOM_SUBNETS_PER_VALIDATOR == 1
 
   let epochParity = slot.epoch mod 2
@@ -442,7 +443,7 @@ proc cycleAttestationSubnets(node: BeaconNode, slot: Slot) =
       unsubscriptions.add(node.network.unsubscribe(
         getAttestationTopic(node.forkDigest, expiringSubnet)))
 
-    waitFor allFutures(unsubscriptions)
+    await allFutures(unsubscriptions)
 
     # https://github.com/ethereum/eth2.0-specs/blob/v1.0.0/specs/phase0/p2p-interface.md#metadata
     # The race condition window is smaller by placing the fast, local, and
@@ -451,7 +452,7 @@ proc cycleAttestationSubnets(node: BeaconNode, slot: Slot) =
     for expiringSubnet in expiringSubnets:
       node.network.metadata.attnets[expiringSubnet] = false
 
-  node.installAttestationSubnetHandlers(newSubnets)
+  await node.installAttestationSubnetHandlers(newSubnets)
 
   block:
     let subscribed_subnets =
@@ -461,11 +462,10 @@ proc cycleAttestationSubnets(node: BeaconNode, slot: Slot) =
     for subnet in 0'u8 ..< ATTESTATION_SUBNET_COUNT:
       node.network.metadata.attnets[subnet] = subnet in subscribed_subnets
 
-proc getAttestationHandlers(node: BeaconNode): Future[void] =
+proc getAttestationSubnetHandlers(node: BeaconNode): Future[void] =
   var initialSubnets: set[uint8]
   for i in 0'u8 ..< ATTESTATION_SUBNET_COUNT:
     initialSubnets.incl i
-  node.installAttestationSubnetHandlers(initialSubnets)
 
   # https://github.com/ethereum/eth2.0-specs/blob/v1.0.0/specs/phase0/validator.md#phase-0-attestation-subnet-stability
   let wallEpoch =  node.beaconClock.now().slotOrZero().epoch
@@ -478,31 +478,7 @@ proc getAttestationHandlers(node: BeaconNode): Future[void] =
   node.attestationSubnets.subscribedSubnets[0] = initialSubnets
   node.attestationSubnets.subscribedSubnets[1] = initialSubnets
 
-  const topicParams = TopicParams(
-    topicWeight: 0.5,
-    timeInMeshWeight: 0.03333333333333333,
-    timeInMeshQuantum: chronos.seconds(12),
-    timeInMeshCap: 300,
-    firstMessageDeliveriesWeight: 0.10764904539552399,
-    firstMessageDeliveriesDecay: 0.8659643233600653,
-    firstMessageDeliveriesCap: 371.5778421725158,
-    meshMessageDeliveriesWeight: -0.07538533073670682,
-    meshMessageDeliveriesDecay: 0.930572040929699,
-    meshMessageDeliveriesThreshold: 53.404248450179836,
-    meshMessageDeliveriesCap: 213.61699380071934,
-    meshMessageDeliveriesActivation: chronos.seconds(384),
-    meshMessageDeliveriesWindow: chronos.seconds(2),
-    meshFailurePenaltyWeight: -0.07538533073670682 ,
-    meshFailurePenaltyDecay: 0.930572040929699,
-    invalidMessageDeliveriesWeight: -214.99999999999994,
-    invalidMessageDeliveriesDecay: 0.9971259067705325
-  )
-
-  static:
-    # compile time validation
-    topicParams.validateParameters().tryGet()
-
-  node.network.subscribe(getAggregateAndProofsTopic(node.forkDigest), topicParams)
+  node.installAttestationSubnetHandlers(initialSubnets)
 
 proc addMessageHandlers(node: BeaconNode): Future[void] =
   const 
@@ -525,11 +501,31 @@ proc addMessageHandlers(node: BeaconNode): Future[void] =
       invalidMessageDeliveriesWeight: -214.99999999999994,
       invalidMessageDeliveriesDecay: 0.9971259067705325
     )
+    aggregateTopicParams = TopicParams(
+      topicWeight: 0.5,
+      timeInMeshWeight: 0.03333333333333333,
+      timeInMeshQuantum: chronos.seconds(12),
+      timeInMeshCap: 300,
+      firstMessageDeliveriesWeight: 0.10764904539552399,
+      firstMessageDeliveriesDecay: 0.8659643233600653,
+      firstMessageDeliveriesCap: 371.5778421725158,
+      meshMessageDeliveriesWeight: -0.07538533073670682,
+      meshMessageDeliveriesDecay: 0.930572040929699,
+      meshMessageDeliveriesThreshold: 53.404248450179836,
+      meshMessageDeliveriesCap: 213.61699380071934,
+      meshMessageDeliveriesActivation: chronos.seconds(384),
+      meshMessageDeliveriesWindow: chronos.seconds(2),
+      meshFailurePenaltyWeight: -0.07538533073670682 ,
+      meshFailurePenaltyDecay: 0.930572040929699,
+      invalidMessageDeliveriesWeight: -214.99999999999994,
+      invalidMessageDeliveriesDecay: 0.9971259067705325
+    )
     basicParams = TopicParams.init()
 
   static:
     # compile time validation
     blocksTopicParams.validateParameters().tryGet()
+    aggregateTopicParams.validateParameters().tryGet()
     basicParams.validateParameters.tryGet()
 
   allFutures(
@@ -538,8 +534,8 @@ proc addMessageHandlers(node: BeaconNode): Future[void] =
     node.network.subscribe(getAttesterSlashingsTopic(node.forkDigest), basicParams),
     node.network.subscribe(getProposerSlashingsTopic(node.forkDigest), basicParams),
     node.network.subscribe(getVoluntaryExitsTopic(node.forkDigest), basicParams),
-
-    node.getAttestationHandlers()
+    node.network.subscribe(getAggregateAndProofsTopic(node.forkDigest), aggregateTopicParams),
+    node.getAttestationSubnetHandlers()
   )
 
 func getTopicSubscriptionEnabled(node: BeaconNode): bool =
@@ -614,7 +610,7 @@ proc updateGossipStatus(node: BeaconNode, slot: Slot) {.async.} =
 
   # Subscription or unsubscription might have occurred; recheck
   if slot.isEpoch and node.getTopicSubscriptionEnabled:
-    node.cycleAttestationSubnets(slot)
+    await node.cycleAttestationSubnets(slot)
 
 proc onSlotStart(node: BeaconNode, lastSlot, scheduledSlot: Slot) {.async.} =
   ## Called at the beginning of a slot - usually every slot, but sometimes might
