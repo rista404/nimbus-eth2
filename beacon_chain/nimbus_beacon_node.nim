@@ -505,27 +505,27 @@ proc getAttestationHandlers(node: BeaconNode): Future[void] =
   node.network.subscribe(getAggregateAndProofsTopic(node.forkDigest), topicParams)
 
 proc addMessageHandlers(node: BeaconNode): Future[void] =
-  const blocksTopicParams = TopicParams(
-    topicWeight: 0.5,
-    timeInMeshWeight: 0.03333333333333333,
-    timeInMeshQuantum: chronos.seconds(12),
-    timeInMeshCap: 300,
-    firstMessageDeliveriesWeight: 1.1471603557060206,
-    firstMessageDeliveriesDecay: 0.9928302477768374,
-    firstMessageDeliveriesCap: 34.86870846001471,
-    meshMessageDeliveriesWeight: -458.31054878249114,
-    meshMessageDeliveriesDecay: 0.9716279515771061,
-    meshMessageDeliveriesThreshold: 0.6849191409056553,
-    meshMessageDeliveriesCap: 2.054757422716966,
-    meshMessageDeliveriesActivation: chronos.seconds(384),
-    meshMessageDeliveriesWindow: chronos.seconds(2),
-    meshFailurePenaltyWeight: -458.31054878249114 ,
-    meshFailurePenaltyDecay: 0.9716279515771061,
-    invalidMessageDeliveriesWeight: -214.99999999999994,
-    invalidMessageDeliveriesDecay: 0.9971259067705325
-  )
-
-  const basicParams = TopicParams.init()
+  const 
+    blocksTopicParams = TopicParams(
+      topicWeight: 0.5,
+      timeInMeshWeight: 0.03333333333333333,
+      timeInMeshQuantum: chronos.seconds(12),
+      timeInMeshCap: 300,
+      firstMessageDeliveriesWeight: 1.1471603557060206,
+      firstMessageDeliveriesDecay: 0.9928302477768374,
+      firstMessageDeliveriesCap: 34.86870846001471,
+      meshMessageDeliveriesWeight: -458.31054878249114,
+      meshMessageDeliveriesDecay: 0.9716279515771061,
+      meshMessageDeliveriesThreshold: 0.6849191409056553,
+      meshMessageDeliveriesCap: 2.054757422716966,
+      meshMessageDeliveriesActivation: chronos.seconds(384),
+      meshMessageDeliveriesWindow: chronos.seconds(2),
+      meshFailurePenaltyWeight: -458.31054878249114 ,
+      meshFailurePenaltyDecay: 0.9716279515771061,
+      invalidMessageDeliveriesWeight: -214.99999999999994,
+      invalidMessageDeliveriesDecay: 0.9971259067705325
+    )
+    basicParams = TopicParams.init()
 
   static:
     # compile time validation
